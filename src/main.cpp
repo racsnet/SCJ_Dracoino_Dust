@@ -5,6 +5,7 @@
 #include <hal/hal.h>
 #include <SPI.h>
 #include <LowPower.h>
+#include <DHTStable.h>
 
 #include "config.h"
 #include "devices.h"
@@ -13,15 +14,22 @@
 bool trx_running = false;
 
 SoftwareSerial Sensor(SSD011_RX, SSD011_TX); // RX, TX
+DHTStable DHT;
+uint8_t mydata[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-uint8_t mydata[] = {0x00, 0x00, 0x00, 0x00};
+union FBConv {
+  float f_value;
+  uint8_t b_value[4];
+};
+
+FBConv temperature, humidity;
 
 static osjob_t sendjob;
 
-uint16_t TX_SENSE_TICKS = 2;
+uint16_t TX_SENSE_TICKS = 1;
 unsigned long LAST_SENSE_TX = 0;
 
-uint16_t TX_BAT_TICKS = 4;
+uint16_t TX_BAT_TICKS = 40;
 unsigned long LAST_BAT_TX = 0;
 
 unsigned long ticks = 0;
@@ -39,16 +47,49 @@ uint8_t get_bat() {
     return constrain(map(analogRead(A0), BAT_MIN, BAT_MAX, 1, 254), 1, 254);
 }
 
+int GetDHT22() {
+    int result = 0;
+    digitalWrite(DHT22_EN, HIGH);
+    delay(1000);
+    
+    int chk = DHT.read22(DHT22_DAT);
+    switch (chk)
+    {
+    case DHTLIB_OK:
+        temperature.f_value = DHT.getTemperature();
+        humidity.f_value = DHT.getHumidity();
+        break;
+    case DHTLIB_ERROR_CHECKSUM:
+        result = DHT_ERR_CHECKSUM;
+        break;
+    case DHTLIB_ERROR_TIMEOUT:
+        result = DHT_ERR_TIMEOUT;
+        break;
+    case DHTLIB_INVALID_VALUE:
+        result = DHT_ERR_INVALID;
+        break;
+    default:
+        result = DHT_ERR_UNKNOWN;
+        break;
+    }
+
+    digitalWrite(DHT22_EN, LOW);
+    return result;
+}
 
 bool GetSensor() {
-    unsigned long started = millis();
     int counter = 0;
     byte buff[255];
     byte id1, id2, checksum;
     bool valid = false;
     digitalWrite(SDS011_EN, HIGH);
-    delay(1000);
-  
+    for (int i = 0; i < 10; i++) {
+        delay(1000);
+        while (Sensor.available()) {
+            Sensor.read();
+        }
+    }
+    unsigned long started = millis();
     while (millis() - started < 5000) {
         if (Sensor.available()) {
             buff[counter] = Sensor.read();
@@ -204,8 +245,6 @@ void onEvent (ev_t ev) {
 void setup() {
 //  initialize all unused pins as output for current saving
 
-    Serial.begin(115200);
-
     #ifdef PINMODEPOWERSAVE
     pinMode(0,OUTPUT);
     pinMode(1,OUTPUT);
@@ -219,7 +258,6 @@ void setup() {
     pinMode(A1,OUTPUT);
     pinMode(A2,OUTPUT);
     pinMode(A3,OUTPUT);
-    pinMode(A4,OUTPUT);
     pinMode(A5,OUTPUT);
     #endif
 
@@ -259,7 +297,21 @@ void loop() {
     }
     else if ( (ticks - LAST_SENSE_TX > TX_SENSE_TICKS) && !trx_running ) {
         if (GetSensor()) {
-            do_send(&sendjob, MY_PORT);
+            int dht_result = GetDHT22();
+            if (dht_result > 0) {
+                do_send(&sendjob, SCJ_PORT_ERR, dht_result);
+            }
+            else {
+                mydata[4] = temperature.b_value[0];
+                mydata[5] = temperature.b_value[1];
+                mydata[6] = temperature.b_value[2];
+                mydata[7] = temperature.b_value[3];
+                mydata[8] = humidity.b_value[0];
+                mydata[9] = humidity.b_value[1];
+                mydata[10] = humidity.b_value[2];
+                mydata[11] = humidity.b_value[3];
+                do_send(&sendjob, MY_PORT);
+            }
         }
         else {
             do_send(&sendjob, SCJ_PORT_ERR);
